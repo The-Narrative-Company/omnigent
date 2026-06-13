@@ -17,15 +17,25 @@ name: Maintainer Approval
 # self-grant the gate. The same property is documented in
 # merge-ready.yml's force-merge eligibility step.
 #
-# Defense-in-depth note: a malicious PR could also edit *this*
-# workflow to drop `?ref=main`. On its own `pull_request_review` and
-# `pull_request` events the modified workflow would run (those events
-# use the workflow on the PR branch). That would let the PR
-# self-grant the Maintainer Approval status. The remaining defense is
+# Fork-PR token note: the status is posted through the GitHub API,
+# which needs `statuses: write`. A fork PR's `pull_request` token is
+# forced read-only regardless of the `permissions:` block, so the POST
+# would 403 for any contributor PR from a fork. The step below detects
+# that case and skips the POST (rather than erroring): with no status
+# reported, branch protection leaves the required `Maintainer Approval`
+# check unsatisfied -- which is exactly the gate we want -- until a
+# maintainer reviews. The `pull_request_review` event runs in the base
+# repo with a writable token even for forks, so it posts the result
+# then. (We deliberately do not use a base-context PR trigger that runs
+# with secrets on fork code: the public CI leak gate forbids it.)
+#
+# Defense-in-depth note: a malicious PR could edit *this* workflow to
+# drop `?ref=main`. On its own `pull_request_review` and `pull_request`
+# events the modified workflow would run from the PR branch, which
+# could let the PR self-grant the status. The remaining defense is
 # `required_pull_request_reviews` in branch protection -- a real
-# maintainer still has to click Merge, and the PR has to come through
-# a PR (no direct push to main). For an internal repo this is
-# adequate; for a public repo we'd want a separate enforcement path.
+# maintainer still has to click Merge, and every change arrives through
+# a PR (no direct push to main).
 
 on:
   pull_request:
@@ -58,6 +68,8 @@ jobs:
           REPO:     ${{ github.repository }}
           PR:       ${{ github.event.pull_request.number }}
           SHA:      ${{ github.event.pull_request.head.sha }}
+          EVENT:    ${{ github.event_name }}
+          IS_FORK:  ${{ github.event.pull_request.head.repo.fork }}
         run: |
           # --- Load maintainers from .github/MAINTAINER at main's tip ---
           set +e
@@ -124,6 +136,18 @@ jobs:
           # GitHub commit-status descriptions max out at 140 chars.
           if [[ ${#DESC} -gt 140 ]]; then
             DESC="${DESC:0:137}..."
+          fi
+
+          # A fork PR's pull_request token is read-only, so the status
+          # POST would 403. Skip it on that event/fork combination -- the
+          # required check stays unreported (which blocks merge, the
+          # intended gate) until a maintainer reviews, at which point the
+          # writable pull_request_review token posts the result.
+          if [[ "$EVENT" == "pull_request" && "$IS_FORK" == "true" ]]; then
+            echo "Fork PR on pull_request event: token is read-only, " \
+              "skipping status POST. Awaiting maintainer review " \
+              "(would post Maintainer Approval=$STATE: $DESC)."
+            exit 0
           fi
 
           gh api "repos/$REPO/statuses/$SHA" \

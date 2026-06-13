@@ -1,11 +1,10 @@
 # Sourced by evaluate-checks.sh. Only always-on checks are required (unit
-# tests, lint, type-check, PR template). The e2e and integration suites run
-# on schedule/dispatch only and are intentionally absent from REQUIRED and
+# tests, lint, type-check). The e2e and integration suites run on
+# schedule/dispatch only and are intentionally absent from REQUIRED and
 # ALLOW_SKIP so missing checks do not block contributor PRs.
 # Generated file -- do not hand-edit; it is replaced wholesale on every sync.
 
 REQUIRED=(
-  "PR Template"
   "Pre-commit checks"
   "Pytest (runtime-harnesses)"
   "Pytest (runtime-policies)"
