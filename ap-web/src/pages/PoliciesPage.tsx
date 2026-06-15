@@ -51,9 +51,7 @@ function AddDefaultPolicyDialog({
 }) {
   const [selected, setSelected] = useState<string>("");
   const [filter, setFilter] = useState("");
-  const [factoryParams, setFactoryParams] = useState<Record<string, string>>(
-    {},
-  );
+  const [factoryParams, setFactoryParams] = useState<Record<string, string>>({});
   const [paramError, setParamError] = useState<string | null>(null);
   const addPolicy = useAddDefaultPolicy();
 

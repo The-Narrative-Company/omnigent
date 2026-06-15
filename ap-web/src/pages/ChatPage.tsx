@@ -2780,8 +2780,7 @@ export function Composer({
 
   // Scope recall to the active conversation so ArrowUp surfaces only this
   // chat's prompts, not the last thing typed in any other chat.
-  const { appendEntry, recallPrevious, recallNext, resetCursor } =
-    usePromptHistory(conversationId);
+  const { appendEntry, recallPrevious, recallNext, resetCursor } = usePromptHistory(conversationId);
   // Set just before recall sets `value`; cleared when the resulting onChange
   // fires. Lets onChange distinguish "user typed" (reset cursor) from
   // "recall replaced the value" (keep cursor).
