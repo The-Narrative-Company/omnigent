@@ -334,3 +334,70 @@ async def test_reconnect_catch_up_scan_keeps_child_native_harness() -> None:
         "scan, which respawns the harness and tears down the live claude-native "
         "terminal ('Bridge closed: terminal resource not found')."
     )
+
+
+@pytest.mark.asyncio
+async def test_resource_access_before_post_caches_child_not_parent_harness() -> None:
+    """A resource request racing ahead of POST must not cache the PARENT harness.
+
+    Root-enabler race: ``_session_spec_cache`` is the source of truth for a
+    session's harness. Two paths populate it and race —
+
+    * ``POST /v1/sessions`` caches the swapped CHILD spec (claude-native);
+    * ``_resolve_session_spec_entry`` (hit by resource endpoints like
+      ``GET /resources``, filesystem, terminal create) caches the spec the
+      bound ``agent_id`` resolves to — the PARENT (claude-sdk).
+
+    The web UI opens resource panels as it creates a sub-agent, so a resource
+    GET frequently lands BEFORE the runner's POST. ``_resolve_session_spec_entry``
+    early-returns once the key is cached, so whoever wins sticks. If the
+    resource path wins on buggy code it caches the parent, ``_is_native_harness``
+    goes False, and the next turn / reconnect flips the harness — tearing down
+    the native terminal.
+
+    This drives that exact ordering: a resource GET first (no prior POST), then
+    a turn. The turn must spawn ``claude-native``. On buggy code the cached
+    parent spec yields ``claude-sdk``.
+    """
+    hc = _ScriptedHarnessClient(
+        [
+            _sse({"type": "response.created", "response": {"id": "r1"}}),
+            _sse({"type": "response.completed", "response": {"id": "r1"}}),
+        ]
+    )
+    pm = _FakeProcessManager(hc)
+    app = create_runner_app(
+        process_manager=pm,  # type: ignore[arg-type]
+        spec_resolver=_parent_spec_resolver,
+        server_client=_SubAgentSnapshotServer(),  # type: ignore[arg-type]
+    )
+
+    async with _runner_client(app) as client:
+        # Resource access BEFORE any POST /v1/sessions — populates the spec
+        # cache via _resolve_session_spec_entry (the racing path).
+        rsrc = await client.get(f"/v1/sessions/{CHILD_SESSION_ID}/resources")
+        assert rsrc.status_code == 200, f"{rsrc.status_code} {rsrc.text}"
+
+        # Now a turn dispatches; it must resolve the CHILD harness despite the
+        # resource path having cached first.
+        resp = await client.post(
+            f"/v1/sessions/{CHILD_SESSION_ID}/events",
+            params={"stream": "true"},
+            json={
+                "type": "message",
+                "role": "user",
+                "agent_id": PARENT_AGENT_ID,
+                "content": [{"type": "input_text", "text": "hi"}],
+            },
+        )
+        assert resp.status_code == 200, f"{resp.status_code} {resp.text}"
+        _ = resp.text
+
+    harnesses = [h for (conv, h, _env) in pm.get_client_calls if conv == CHILD_SESSION_ID]
+    assert harnesses, "the turn never asked the process manager for a harness"
+    assert all(h == "claude-native" for h in harnesses), (
+        f"after a resource GET raced ahead of POST, the turn spawned {harnesses!r} "
+        "for the sub-agent session; expected only 'claude-native'. A 'claude-sdk' "
+        "spawn means the resource path cached the parent spec and it stuck — the "
+        "race that ultimately tears down the native terminal ('Bridge closed')."
+    )
