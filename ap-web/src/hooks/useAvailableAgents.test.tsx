@@ -259,6 +259,15 @@ describe("useAvailableAgents", () => {
             agent_id: "ag_clone",
             agent_name: "claude-native-ui (fork conv_9)",
           },
+          // A fork OF A fork of the built-in — nested clone suffixes. A
+          // single-layer strip leaves "claude-native-ui (fork conv_9)"
+          // (not a built-in name) and the clone leaks into the picker;
+          // agentRootName peels every layer, so this drops by name too.
+          {
+            id: "conv_6",
+            agent_id: "ag_clone2",
+            agent_name: "claude-native-ui (fork conv_9) (fork conv_10)",
+          },
           // Genuinely custom agent; survives and is enriched below.
           { id: "conv_3", agent_id: "ag_doc", agent_name: "doc-writer" },
           // Same custom agent on an older session — deduped by id, and
@@ -282,8 +291,9 @@ describe("useAvailableAgents", () => {
     const { result } = renderHook(() => useAvailableAgents(), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
-    // One built-in + one custom. ag_clone or ag_native appearing twice
-    // means shadow-dropping regressed; ag_doc missing means kind=any
+    // One built-in + one custom. ag_clone, ag_clone2, or ag_native
+    // appearing means shadow-dropping regressed (ag_clone2 specifically
+    // guards the nested fork-of-fork case); ag_doc missing means kind=any
     // discovery broke; two ag_doc rows mean the by-id dedup broke.
     expect(result.current.data).toEqual([
       {

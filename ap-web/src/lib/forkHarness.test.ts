@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   agentBaseName,
+  agentRootName,
   harnessFamily,
   isNativeHarness,
   forkTargetCarriesHistory,
@@ -115,5 +116,29 @@ describe("agentBaseName", () => {
     // Fork-of-a-fork names accumulate suffixes; one call removes one
     // layer (callers compare against catalogs of single-layer names).
     expect(agentBaseName("polly (fork conv_a) (switch conv_b)")).toBe("polly (fork conv_a)");
+  });
+});
+
+describe("agentRootName", () => {
+  it("returns a plain name unchanged", () => {
+    expect(agentRootName("claude-native-ui")).toBe("claude-native-ui");
+  });
+
+  it("peels a single clone layer", () => {
+    expect(agentRootName("claude-native-ui (fork ag_3a9fa87)")).toBe("claude-native-ui");
+  });
+
+  it("peels every layer of a fork-of-a-fork", () => {
+    // Where agentBaseName stops after one layer, agentRootName recurses to
+    // the root so a multi-fork clone of a built-in still matches the
+    // built-in catalog (and is dropped by the agent picker).
+    expect(agentRootName("claude-native-ui (fork ag_a) (fork ag_b)")).toBe("claude-native-ui");
+    expect(agentRootName("polly (fork conv_a) (switch conv_b)")).toBe("polly");
+  });
+
+  it("leaves interior or non-clone parentheses alone", () => {
+    // Only trailing clone markers are peeled — user-chosen parens survive.
+    expect(agentRootName("my-agent (beta)")).toBe("my-agent (beta)");
+    expect(agentRootName("agent (fork pun) helper")).toBe("agent (fork pun) helper");
   });
 });

@@ -93,3 +93,28 @@ export function forkTargetCarriesHistory(targetHarness: string | null | undefine
 export function agentBaseName(name: string): string {
   return name.replace(/ \((?:fork|switch) [^)]+\)$/, "");
 }
+
+/**
+ * The base name behind ANY chain of fork/switch clone suffixes.
+ *
+ * {@link agentBaseName} removes a single trailing `(fork <id>)` /
+ * `(switch <id>)` layer, but a fork of a fork accumulates them — e.g.
+ * `"claude-native-ui (fork ag_a) (fork ag_b)"`. Callers that compare a
+ * clone's name against a single-layer catalog (the agent picker dropping
+ * session agents that shadow a built-in) must peel EVERY layer, otherwise
+ * a multi-layer clone of a built-in strips to `"claude-native-ui (fork
+ * ag_a)"`, fails the built-in-name match, and leaks into the picker as a
+ * spurious "custom" agent.
+ *
+ * @param name - An agent name, possibly with nested clone suffixes.
+ * @returns The root base name with all clone suffixes removed.
+ */
+export function agentRootName(name: string): string {
+  let prev: string;
+  let cur = name;
+  do {
+    prev = cur;
+    cur = agentBaseName(cur);
+  } while (cur !== prev);
+  return cur;
+}
