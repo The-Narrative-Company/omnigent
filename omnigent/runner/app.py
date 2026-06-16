@@ -7637,7 +7637,16 @@ def create_runner_app(
         # the child gets the sub-agent's prompt/tools, not the
         # parent's (which would cause infinite recursion via
         # sys_session_send).
-        _sa_name = _session_sub_agent_names.get(conv)
+        #
+        # Recover the name from the server snapshot when the in-memory map
+        # was lost (runner restart / tunnel reconnect): without this, a
+        # continuation turn for a claude-native sub-agent resolves the
+        # parent's claude-sdk harness, the process manager respawns, and the
+        # child's native terminal is torn down ("Bridge closed: terminal
+        # resource not found"). The snapshot carries sub_agent_name; this
+        # is the primary turn path (the harness baked into TurnDispatch
+        # below comes from the swapped spec, so it must be correct here).
+        _sa_name = await _recover_sub_agent_name(conv)
         if _sa_name and cached_spec is not None:
             from omnigent.runtime.workflow import _find_spec_by_name
 
