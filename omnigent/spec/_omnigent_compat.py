@@ -79,6 +79,7 @@ OMNIGENT_HARNESSES = frozenset(
         "claude-sdk",
         "codex",
         "codex-native",
+        "copilot",
         "cursor",
         "databricks_supervisor",
         "openai-agents",
@@ -89,7 +90,7 @@ OMNIGENT_HARNESSES = frozenset(
 )
 # User-facing aliases accepted in specs and normalized before runtime dispatch.
 OMNIGENT_HARNESS_ALIASES = frozenset(
-    {"claude", "native-pi", "openai-agents-sdk", "agy", "google-antigravity"}
+    {"claude", "native-pi", "openai-agents-sdk", "agy", "google-antigravity", "github-copilot"}
 )
 _OMNIGENT_ACCEPTED_HARNESSES = OMNIGENT_HARNESSES | OMNIGENT_HARNESS_ALIASES
 

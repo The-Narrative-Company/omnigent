@@ -15,6 +15,9 @@ HARNESS_ALIASES: dict[str, str] = {
     # canonical id is "antigravity" (matches the registry / workflow type).
     "agy": "antigravity",
     "google-antigravity": "antigravity",
+    # User-facing spelling for the GitHub Copilot SDK harness; the canonical id
+    # is "copilot" (matches the registry / workflow type).
+    "github-copilot": "copilot",
 }
 
 # Canonical native-CLI harness spellings. These harnesses type messages into

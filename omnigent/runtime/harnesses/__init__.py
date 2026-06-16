@@ -69,6 +69,12 @@ _HARNESS_MODULES: dict[str, str] = {
     # localharness binary; needs glibc >=~2.36). Drives Gemini 3.5 Flash by
     # default (also Claude / GPT-OSS), with Gemini API-key or Vertex AI auth.
     "antigravity": "omnigent.inner.antigravity_harness",
+    # GitHub Copilot SDK harness wrap. See omnigent/inner/copilot_harness.py.
+    # In-process SDK harness (``github-copilot-sdk``), like cursor / antigravity:
+    # the SDK bundles the Copilot CLI binary it drives as a backing server, so
+    # Omnigent spawns no separately-installed CLI. Authenticates against GitHub's
+    # Copilot backend with a GitHub token (no Databricks gateway).
+    "copilot": "omnigent.inner.copilot_harness",
     # Supervisor harness wrap. See
     # omnigent/inner/databricks_supervisor_harness.py. Drives the Databricks
     # Agent Bricks Supervisor API at
