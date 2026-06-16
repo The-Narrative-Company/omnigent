@@ -1291,10 +1291,18 @@ def server_pid(live_server: str) -> int:
 # up a different agent" without the multi-provider sprawl of the packaged
 # ``polly`` / ``debby`` examples.
 #
-# Native CLI built-ins (``claude-native-ui`` / ``codex-native-ui``) are not
-# wired up here yet: driving the real vendor TUI in a PTY needs CI-side setup
-# (gateway auth + Claude Code first-run state) owned by the native-harness CI
-# enablement work. Add those fixtures back alongside that effort.
+# ``native_claude_session`` is the native-CLI counterpart: it spins up a real
+# ``claude-native`` ("Claude Code") wrapper session — the same terminal-first
+# spec ``omnigent claude`` ships — and yields ``(base_url, session_id)``. The
+# runner auto-launches Claude Code in the session terminal on bind, including
+# the gateway auth it derives from the runner's own credentials and the
+# first-run trust/onboarding pre-accept, so no CLI client is needed. In CI the
+# workflow exchanges Databricks OAuth before pytest runs (the same gateway the
+# ``hello_world`` / ``echo_probe`` agents authenticate against), so Claude Code
+# boots non-interactively. The native render-parity suite drives this fixture.
+#
+# ``codex-native-ui`` is still not wired up here — add a sibling fixture
+# alongside that effort.
 # ---------------------------------------------------------------------------
 
 # A precise-echo agent on the openai-agents harness (same provider family as
@@ -1386,3 +1394,99 @@ def custom_agent_session(
         if respawned is not None:
             respawned.terminate()
             respawned.wait(timeout=5)
+
+
+def _create_native_claude_session(base_url: str, runner_id: str) -> str:
+    """Register the ``claude-native`` wrapper agent and bind its session.
+
+    Reuses the exact terminal-first spec ``omnigent claude`` ships
+    (:func:`omnigent.claude_native._materialize_claude_agent_spec`) so the
+    fixture never drifts from production, and stamps the same wrapper /
+    terminal-first labels (``omnigent.wrapper`` + ``omnigent.ui = terminal``)
+    the CLI writes. The spec carries no ``spec_version``, so it is bundled
+    under a ``*.yaml`` arcname to route through the omnigent compat translator
+    (which preserves ``executor.harness`` + ``terminals:``); a ``config.yaml``
+    arcname would hit the strict parser and reject it.
+
+    Binding the session to the runner triggers the runner's claude-native
+    auto-bootstrap: it launches Claude Code in the session terminal, derives
+    the gateway auth from its own credentials, and pre-accepts the first-run
+    trust/onboarding prompts — no CLI client required.
+
+    :param base_url: Spawned server base URL.
+    :param runner_id: The token-bound runner id to bind.
+    :returns: The new session/conversation id.
+    """
+    import json as _json
+    import tempfile
+
+    from omnigent._wrapper_labels import (
+        CLAUDE_NATIVE_WRAPPER_VALUE,
+        UI_MODE_LABEL_KEY,
+        UI_MODE_TERMINAL_VALUE,
+        WRAPPER_LABEL_KEY,
+    )
+    from omnigent.claude_native import _materialize_claude_agent_spec
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        spec_path = _materialize_claude_agent_spec(Path(_tmp))
+        yaml_text = spec_path.read_text()
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        data = yaml_text.encode()
+        # Non-config.yaml arcname → omnigent compat translator (the spec has
+        # no spec_version), matching the terminal_session fixture.
+        info = tarfile.TarInfo("claude-native-ui.yaml")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+
+    labels = {
+        UI_MODE_LABEL_KEY: UI_MODE_TERMINAL_VALUE,
+        WRAPPER_LABEL_KEY: CLAUDE_NATIVE_WRAPPER_VALUE,
+    }
+    create = httpx.post(
+        f"{base_url}/v1/sessions",
+        data={"metadata": _json.dumps({"labels": labels})},
+        files={"bundle": ("claude-native-ui.tar.gz", buf.getvalue(), "application/gzip")},
+        timeout=30.0,
+    )
+    create.raise_for_status()
+    session_id = str(create.json()["session_id"])
+    _bind_session_runner(base_url, session_id, runner_id)
+    return session_id
+
+
+@pytest.fixture
+def native_claude_session(
+    live_server: str,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[tuple[str, str]]:
+    """A runner-bound session on the real ``claude-native`` ("Claude Code") wrapper.
+
+    The runner auto-launches Claude Code in the session terminal on bind
+    (gateway auth + first-run pre-accept handled runner-side), so the SPA's
+    Terminal view attaches to a live Claude Code TUI and its Chat view renders
+    the same canonical transcript. Drives the native render-parity suite.
+
+    :param live_server: Spawned server fixture; its runner is reused.
+    :param tmp_path_factory: Pytest temp path factory (for a respawn log).
+    :returns: ``(base_url, session_id)``.
+    """
+    respawned = _ensure_runner_online(live_server, tmp_path_factory)
+    runner_id = str(_server_state["runner_id"])
+    session_id = _create_native_claude_session(live_server, runner_id)
+    try:
+        yield (live_server, session_id)
+    finally:
+        httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+        if respawned is not None:
+            respawned.terminate()
+            # Escalate to SIGKILL if the runner ignores SIGTERM, so a wedged
+            # process can't raise in teardown and leak / fail unrelated tests
+            # (matching terminal_session / seeded_session_pair).
+            try:
+                respawned.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                respawned.kill()
+                respawned.wait(timeout=5)

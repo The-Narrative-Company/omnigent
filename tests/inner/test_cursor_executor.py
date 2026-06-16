@@ -174,6 +174,26 @@ def test_resolve_model_drops_databricks_and_defaults_to_auto() -> None:
     assert _resolve_model(None) == "auto"
 
 
+def test_resolve_model_warns_when_dropping_a_pinned_model(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Dropping an explicit (non-cursor) model must warn, not whisper at debug —
+    otherwise a user who pinned a non-Cursor model has no idea it was ignored."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="omnigent.inner.cursor_executor"):
+        assert _resolve_model("databricks-claude-opus-4-8") == "auto"
+    assert any(
+        r.levelno == logging.WARNING and "not a Cursor model" in r.getMessage()
+        for r in caplog.records
+    )
+    # No warning when there was no explicit model to honor.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="omnigent.inner.cursor_executor"):
+        assert _resolve_model(None) == "auto"
+    assert not caplog.records
+
+
 def test_sdk_message_to_events_maps_text_thinking_and_tools() -> None:
     assert isinstance(_sdk_message_to_events(_assistant("hi"))[0], TextChunk)
     think = _sdk_message_to_events(_thinking("hmm"))
@@ -215,6 +235,36 @@ def test_sdk_message_to_events_unwraps_cursor_custom_tool_envelope() -> None:
     assert isinstance(events[0], ToolCallRequest)
     assert events[0].name == "sys_session_send"
     assert events[0].args == {"session": "s1", "message": "go"}
+
+
+def test_sdk_message_to_events_unwraps_envelope_on_completion_and_error() -> None:
+    # The same mcp envelope (name == "mcp", real tool nested in args) also arrives
+    # on the completed/error branch. The unwrap must apply there too so the
+    # ToolCallComplete carries the real tool name (not "mcp") — otherwise any
+    # name-keyed request<->complete correlation in policy/UI would break.
+    def _envelope(status: str, result: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            type="tool_call",
+            name="mcp",
+            call_id="c1",
+            status=status,
+            args={
+                "providerIdentifier": "custom-user-tools",
+                "toolName": "sys_session_send",
+                "args": {"session": "s1"},
+            },
+            result=result,
+        )
+
+    done = _sdk_message_to_events(_envelope("completed", [{"type": "text", "text": "ok"}]))
+    assert isinstance(done[0], ToolCallComplete)
+    assert done[0].name == "sys_session_send"  # unwrapped, not "mcp"
+    assert done[0].metadata == {"call_id": "c1"}
+
+    err = _sdk_message_to_events(_envelope("error", "boom"))
+    assert isinstance(err[0], ToolCallComplete)
+    assert err[0].name == "sys_session_send"
+    assert err[0].status == ToolCallStatus.ERROR
 
 
 def test_build_cursor_prompt_prepends_system_then_drops_it() -> None:
@@ -354,6 +404,74 @@ async def test_custom_tool_execute_bridges_to_tool_executor() -> None:
     result = await asyncio.to_thread(execute, {"x": 1}, None)
     assert seen == {"name": "sys_session_send", "args": {"x": 1}}
     assert json.loads(result) == {"ok": True, "echo": {"x": 1}}
+
+
+def _bridged_execute(tool_executor: Any) -> Any:
+    """Wire *tool_executor* onto a CursorExecutor and return its sync ``execute``."""
+    executor = CursorExecutor(api_key="crsr_x")
+    executor._tool_executor = tool_executor
+    return executor._make_execute("sys_session_send", asyncio.get_running_loop())
+
+
+async def test_custom_tool_execute_flags_error_dict_with_iserror() -> None:
+    """A dispatch failure ({"error": ...}) must surface to the model as an SDK
+    error (isError), not an apparently-successful result."""
+
+    async def err(name: str, args: dict[str, Any]) -> Any:
+        return {"error": "dispatch failed"}
+
+    result = await asyncio.to_thread(_bridged_execute(err), {}, None)
+    assert isinstance(result, dict) and result["isError"] is True
+    assert "dispatch failed" in result["content"][0]["text"]
+
+
+async def test_custom_tool_execute_flags_blocked_dict_with_iserror() -> None:
+    """A policy-blocked result ({"blocked": True}) is delivered as an error."""
+
+    async def blocked(name: str, args: dict[str, Any]) -> Any:
+        return {"blocked": True, "reason": "policy"}
+
+    result = await asyncio.to_thread(_bridged_execute(blocked), {}, None)
+    assert isinstance(result, dict) and result["isError"] is True
+    assert "policy" in result["content"][0]["text"]
+
+
+async def test_custom_tool_execute_success_dict_is_not_flagged() -> None:
+    """An ordinary result is returned as text (a str the SDK treats as success),
+    never flagged as an error."""
+
+    async def ok(name: str, args: dict[str, Any]) -> Any:
+        return {"ok": True, "value": 42}
+
+    result = await asyncio.to_thread(_bridged_execute(ok), {}, None)
+    assert isinstance(result, str)
+    assert json.loads(result) == {"ok": True, "value": 42}
+
+
+async def test_custom_tool_execute_times_out_to_iserror(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tool that never completes must not block the daemon thread forever — the
+    bounded wait surfaces a timeout tool error instead of hanging."""
+    monkeypatch.setattr("omnigent.inner.cursor_executor._TOOL_CALL_TIMEOUT_S", 0.05)
+
+    async def slow(name: str, args: dict[str, Any]) -> Any:
+        await asyncio.sleep(30)
+        return "never"
+
+    result = await asyncio.to_thread(_bridged_execute(slow), {}, None)
+    assert isinstance(result, dict) and result["isError"] is True
+    assert "timed out" in result["content"][0]["text"]
+
+
+async def test_custom_tool_execute_surfaces_coroutine_exception_as_iserror() -> None:
+    """A raising coroutine becomes a structured tool error, not an uncaught
+    exception on the SDK's daemon callback thread."""
+
+    async def boom(name: str, args: dict[str, Any]) -> Any:
+        raise RuntimeError("kaboom")
+
+    result = await asyncio.to_thread(_bridged_execute(boom), {}, None)
+    assert isinstance(result, dict) and result["isError"] is True
+    assert "kaboom" in result["content"][0]["text"]
 
 
 async def test_setup_failure_closes_client_and_drops_session(

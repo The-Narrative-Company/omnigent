@@ -722,6 +722,7 @@ async def _auto_create_pi_terminal(
     from omnigent.pi_native import resolve_pi_executable
     from omnigent.pi_native_bridge import (
         PI_NATIVE_CONFIG_ENV_VAR,
+        clear_inbox,
         pi_session_dir,
         prepare_bridge_dir,
         write_extension_files,
@@ -735,6 +736,8 @@ async def _auto_create_pi_terminal(
     )
     workspace = str(launch_config.workspace)
     bridge_dir = prepare_bridge_dir(session_id)
+    # Drop stale payloads so a relaunched Pi process can't replay them.
+    clear_inbox(bridge_dir)
     pi_extension = pi_extension_path(bridge_dir)
     session_dir = pi_session_dir(bridge_dir)
     auth_factory = _make_auth_token_factory()
@@ -6868,10 +6871,11 @@ def create_runner_app(
         Covers the case where the ASK fired while no terminal client was
         attached (the user was in the web Chat), then the user opens the
         Terminal: on attach this re-checks the session snapshot and, if a
-        native approval is still outstanding — the server-side
-        tool-policy gate (``TOOL_CALL`` / ``LLM_REQUEST``, e.g. a
-        cost-budget checkpoint) — pops it on the now-attached
-        client. Self-correcting — it only pops while the elicitation is still
+        native approval is still outstanding — the server-side policy gate
+        (``TOOL_CALL`` / ``LLM_REQUEST``, e.g. a cost-budget checkpoint, or
+        the ``REQUEST`` gate a native session enforces via the
+        ``UserPromptSubmit`` hook) — pops it on the now-attached client.
+        Self-correcting — it only pops while the elicitation is still
         pending, so an already-answered approval is not re-shown. Complements
         the ASK-time forward (which covers clients attached *before* the
         ASK). Best-effort: any miss leaves the web card.
@@ -6900,17 +6904,21 @@ def create_runner_app(
         if resp.status_code != 200:
             return
         pending = resp.json().get("pending_elicitations") or []
-        # The native popup surfaces the server-side tool-policy gate
-        # (tool_call / llm_request — including cost-budget checkpoints),
-        # which parks and resolves via the same endpoint. Re-pop whichever
-        # is pending.
+        # The native popup surfaces the server-side policy gate, which parks
+        # and resolves via the same endpoint. Re-pop whichever is pending:
+        # the tool-policy gate (tool_call / llm_request — including
+        # cost-budget checkpoints) and the request-phase gate (request),
+        # which native sessions enforce via the UserPromptSubmit hook. A
+        # request-phase ASK typically fires while the user is in the web
+        # Chat (no client attached), so the on-attach re-pop is its main
+        # path onto the terminal.
         approval = next(
             (
                 e
                 for e in pending
                 if isinstance(e, dict)
                 and isinstance(e.get("params"), dict)
-                and e["params"].get("phase") in ("tool_call", "llm_request")
+                and e["params"].get("phase") in ("request", "tool_call", "llm_request")
             ),
             None,
         )
@@ -12044,6 +12052,7 @@ _HARNESS_MODEL_ENV_KEY: dict[str, str] = {
     "pi": "HARNESS_PI_MODEL",
     "openai-agents": "HARNESS_OPENAI_AGENTS_MODEL",
     "cursor": "HARNESS_CURSOR_MODEL",
+    "antigravity": "HARNESS_ANTIGRAVITY_MODEL",
 }
 
 
@@ -12071,6 +12080,7 @@ def _build_spawn_env_from_spec(
     """
     try:
         from omnigent.runtime.workflow import (
+            _build_antigravity_spawn_env,
             _build_claude_sdk_spawn_env,
             _build_codex_spawn_env,
             _build_cursor_spawn_env,
@@ -12088,6 +12098,8 @@ def _build_spawn_env_from_spec(
             env = _build_openai_agents_sdk_spawn_env(spec)
         elif harness == "cursor":
             env = _build_cursor_spawn_env(spec, workdir=workdir)
+        elif harness == "antigravity":
+            env = _build_antigravity_spawn_env(spec)
         else:
             # Native terminal harnesses and unknown harnesses build env elsewhere.
             return None

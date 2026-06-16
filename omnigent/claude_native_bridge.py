@@ -1152,6 +1152,15 @@ def build_hook_settings(
         # a catch-all policy evaluation entry so TOOL_RESULT policies
         # fire for all tools, not just the forwarder-specific ones.
         hooks["PostToolUse"].append({"hooks": [evaluate_policy_hook]})
+        # UserPromptSubmit already carries the transcript forwarder's
+        # status hook (running). Append the policy hook so REQUEST-phase
+        # policies gate native prompts — for native sessions this is the
+        # sole request gate (the server-level ``_evaluate_input_policy``
+        # skips native message events). A DENY emits ``decision: "block"``,
+        # dropping the prompt before the model sees it; ASK is resolved
+        # server-side. Covers both web-UI-injected and direct-terminal
+        # prompts, since both fire UserPromptSubmit.
+        hooks["UserPromptSubmit"].append({"hooks": [evaluate_policy_hook]})
     settings: dict[str, Any] = {"hooks": hooks}
     if api_key_helper:
         settings["apiKeyHelper"] = api_key_helper

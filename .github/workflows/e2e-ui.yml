@@ -161,7 +161,7 @@ jobs:
       - name: Install project + dev extras
         run: uv sync --extra all --extra dev
 
-      - name: Install bubblewrap
+      - name: Install bubblewrap + tmux
         # The UI tests boot a real server and open terminals, which run
         # under os_env. An agent/terminal that omits `os_env.sandbox.type`
         # defaults to `linux_bwrap` on Linux and fails loud at runtime if
@@ -171,9 +171,14 @@ jobs:
         # sysctl mirrors ci.yml: Ubuntu 24.04 blocks unprivileged user
         # namespaces by default, which `bwrap`'s `unshare(CLONE_NEWUSER)`
         # needs.
+        #
+        # tmux: the claude-native harness drives Claude Code through a tmux
+        # pane (omnigent/claude_native_bridge), so the native render-parity
+        # test (test_native_claude_render_parity) needs `tmux` on PATH like
+        # e2e.yml.
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap
+          sudo apt-get install -y bubblewrap tmux
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Cache Playwright browsers
@@ -207,7 +212,74 @@ jobs:
           npm ci --legacy-peer-deps --no-audit --no-fund
           npm run build
 
+      # ----------------------------------------------------------------------
+      # Native-claude ("Claude Code") harness enablement. The two steps below
+      # let test_native_claude_render_parity boot a real Claude Code CLI in CI,
+      # mirroring how e2e.yml / integration.yml auth the Claude harnesses. Only
+      # the native render-parity test depends on these; the rest of the e2e-ui
+      # suite (openai-agents) ignores them.
+      # ----------------------------------------------------------------------
+      - name: Install Claude Code CLI
+        # Install claude-code 2.1.170, NOT the 2.1.124 pinned in
+        # .github/ci-deps. 2.1.124 does not recognise the hook events the
+        # native bridge configures (InstructionsLoaded / CwdChanged /
+        # FileChanged) and shows a blocking "settings values skipped" modal on
+        # startup; the injected first message lands on that modal and is lost,
+        # so no turn ever runs. 2.1.170 accepts those events and boots straight
+        # to the prompt. (The ci-deps pin drives e2e.yml's claude-sdk/codex
+        # legs; bumping it there is a separate change with wider blast radius —
+        # tracked for the permanent native-harness wiring.)
+        # --ignore-scripts blocks arbitrary postinstall; we then run claude-code's
+        # own install.cjs explicitly (audited: platform detect + same-tree hardlink
+        # of the native binary, no network/exec) and put its bin on PATH.
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+        run: |
+          mkdir -p "${GITHUB_WORKSPACE}/.cc-cli" && cd "${GITHUB_WORKSPACE}/.cc-cli"
+          npm install --ignore-scripts --no-audit --no-fund @anthropic-ai/claude-code@2.1.170
+          node node_modules/@anthropic-ai/claude-code/install.cjs
+          echo "${GITHUB_WORKSPACE}/.cc-cli/node_modules/.bin" >> "$GITHUB_PATH"
 
+      - name: Configure native-claude gateway provider
+        # The runner derives Claude Code's gateway auth from omnigent provider
+        # config (omnigent.claude_native.resolve_native_claude_config). Register
+        # the Databricks serving-endpoints gateway as the default anthropic
+        # provider: ANTHROPIC_BASE_URL := the gateway, the token reaches Claude
+        # via a printf apiKeyHelper built from env:LLM_API_KEY (the runner env
+        # allowlist excludes ANTHROPIC_API_KEY), model := the CI Claude model.
+        # The config uses an env: ref (not the literal token), so no secret is
+        # written to disk here. ~/.databrickscfg / DATABRICKS_BEARER are
+        # intentionally NOT written: the native-claude path authenticates purely
+        # from this provider config, so there's no ambient Databricks lookup to
+        # satisfy — keeping the literal token off disk.
+        env:
+          GATEWAY_BASE_URL: ${{ secrets.GATEWAY_BASE_URL }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: |
+          mkdir -p "$HOME/.omnigent"
+          cat > "$HOME/.omnigent/config.yaml" <<EOF
+          providers:
+            databricks-gateway:
+              kind: gateway
+              default: anthropic
+              anthropic:
+                # Databricks serves the Anthropic Messages surface at
+                # <host>/serving-endpoints/anthropic (see
+                # omnigent/inner/pi_executor.py: claude_base_url). GATEWAY_BASE_URL
+                # is <host>/serving-endpoints (the OpenAI-compatible surface), so
+                # the /anthropic suffix is required — without it Claude Code POSTs
+                # to .../serving-endpoints/v1/messages and gets no reply.
+                base_url: "${GATEWAY_BASE_URL}/anthropic"
+                api_key_ref: "env:LLM_API_KEY"
+                # The default model id is read from models.default (not a
+                # top-level default_model key). Without it the provider
+                # resolves model=None, Claude Code launches with no --model and
+                # falls back to its built-in 'claude-sonnet-4-6', which the
+                # Databricks gateway rejects (the endpoint name is the
+                # 'databricks-' prefixed id).
+                models:
+                  default: databricks-claude-sonnet-4-6
+          EOF
 
       - name: Run UI e2e tests
         # --ui-skip-build: the SPA was already built in the previous
@@ -275,6 +347,18 @@ jobs:
           retention-days: 3
           if-no-files-found: ignore
 
+      - name: Dump Claude transcript on failure
+        # Claude Code's transcript (the JSONL with its actual API errors)
+        # lives under ~/.claude/projects, a hidden dir the absolute-path
+        # artifact glob misses. Copy it under /tmp so the server-logs upload
+        # captures it when the native test fails. Deliberately NOT copying
+        # ~/.claude.json: its apiKeyHelper embeds the gateway token, so it is
+        # never staged for upload — no credential leaves the runner.
+        if: failure()
+        run: |
+          mkdir -p /tmp/claude-home-dump
+          cp -r "$HOME/.claude/projects" /tmp/claude-home-dump/ 2>/dev/null || true
+
       - name: Upload server logs on failure
         id: upload_server_logs
         if: failure()
@@ -287,7 +371,17 @@ jobs:
           # on GitHub-hosted runners. The previous glob targeted
           # ``e2e_ui_logs*``, which never matched, so the artifact was
           # always empty.
-          path: /tmp/pytest-of-runner/**/e2e_ui_server*/server.log
+          #
+          # Also grab runner.log (carries the claude-native auto-launch +
+          # auth-resolution + terminal-launch logs) and the native bridge dir
+          # (tmux target, transcript-forward deltas) under
+          # /tmp/omnigent-<uid>/claude-native, plus the Claude transcript
+          # staged above — all needed to triage a native render-parity failure.
+          path: |
+            /tmp/pytest-of-runner/**/e2e_ui_server*/server.log
+            /tmp/pytest-of-runner/**/e2e_ui_server*/runner.log
+            /tmp/omnigent-*/claude-native/**
+            /tmp/claude-home-dump/**
           retention-days: 3
           if-no-files-found: ignore
 

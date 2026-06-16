@@ -1028,6 +1028,18 @@ def test_build_hook_settings_registers_policy_hooks_when_omnigent_server_url_set
     # The last entry is the catch-all policy evaluation hook.
     policy_entry_cmd = post_tool_use_entries[-1]["hooks"][0]["command"]
     assert "evaluate-policy" in policy_entry_cmd
+    # UserPromptSubmit carries the forwarder's status hook PLUS the policy
+    # hook appended as a catch-all. For native sessions this is the sole
+    # REQUEST-phase gate (the server-level _evaluate_input_policy skips
+    # native message events), so a missing policy hook here means native
+    # prompts reach the model with no request-phase policy.
+    user_prompt_entries = hooks["UserPromptSubmit"]
+    user_prompt_cmds = [h["command"] for entry in user_prompt_entries for h in entry["hooks"]]
+    assert any("evaluate-policy" in cmd for cmd in user_prompt_cmds), (
+        f"UserPromptSubmit policy hook not registered; got {user_prompt_cmds!r}"
+    )
+    # The forwarder's status hook must survive (the policy hook is appended).
+    assert any("evaluate-policy" not in cmd for cmd in user_prompt_cmds)
 
 
 def test_build_hook_settings_registers_message_display_hook(
